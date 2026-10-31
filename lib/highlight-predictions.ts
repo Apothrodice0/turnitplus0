@@ -19,6 +19,10 @@ import { comparisonText } from "./similarity-core";
  * newer one, and completing only ever UPDATEs, so a result that arrives after the report was deleted writes nothing.
  * A retryable failure waits (RETRY_DELAYS_MS); a further attempt starts from the sweep or from the owner's next read.
  *
+ * DAILY CEILING. Every call first reserves its words against HIGHLIGHT_MODEL_DAILY_WORD_LIMIT for the UTC day
+ * (highlight_model_usage_daily); one that does not fit waits for the next day without using up an attempt. This is the
+ * exact, immediate spending stop; the cloud budget only reports after the fact.
+ *
  * ACCESS. Rows answer only for their own report, and the routes that read them have already passed the report's
  * ownership and subscription checks. Reuse of a finished result stays inside one account, so one customer's document
  * never reveals anything about another's. Rows go with their report (lib/account-deletion.ts, app/api/reports).
@@ -112,6 +116,31 @@ async function recordFailure(client: Executor, key: HighlightPredictionKey, atte
   });
 }
 
+const utcDay = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+
+/** Reserves today's share of the daily word limit for one call; false when it does not fit. Exact under concurrency. */
+async function reserveDailyWords(client: Executor, words: number, limit: number, nowMs: number): Promise<boolean> {
+  if (words > limit) return false;
+  const result = await client.execute({
+    sql: `INSERT INTO highlight_model_usage_daily (day, calls, words) VALUES (?, 1, ?)
+          ON CONFLICT (day) DO UPDATE SET calls = calls + 1, words = words + excluded.words
+           WHERE highlight_model_usage_daily.words + excluded.words <= ?
+          RETURNING calls`,
+    args: [utcDay(nowMs), words, limit],
+  });
+  return result.rows.length === 1;
+}
+
+/** Hands the claim back without using up an attempt; it runs again after the next UTC midnight. */
+async function deferToNextDay(client: Executor, key: HighlightPredictionKey, attempt: number, nowMs: number): Promise<void> {
+  const nextDay = Date.parse(`${utcDay(nowMs)}T00:00:00Z`) + 24 * 60 * 60_000 + 5 * 60_000;
+  await client.execute({
+    sql: `UPDATE report_highlight_predictions SET status = 'pending', attempts = attempts - 1, lease_until = NULL, next_attempt_at = ?, updated_at = ?
+           WHERE report_device_key = ? AND report_id = ? AND status = 'running' AND attempts = ?`,
+    args: [nextDay, nowMs, key.deviceKey, key.reportId, attempt],
+  });
+}
+
 /** Rows whose lease ran out on their last attempt can never be claimed again: they are finished. */
 async function closeExhaustedPredictions(client: Executor, nowMs: number): Promise<void> {
   await client.execute({
@@ -156,9 +185,16 @@ export async function processHighlightPrediction(
         return;
       }
       const reused = await reusableRanges(client, row.account_id, row.model_version, row.text_sha256);
-      const ranges = reused !== null
-        ? sanitizePredictedRanges(JSON.parse(reused), comparisonText(row.text).length)
-        : await requestPredictedHighlights(row.text, config, options.fetchImpl ?? fetch);
+      if (reused !== null) {
+        await completePrediction(client, key, attempt, sanitizePredictedRanges(JSON.parse(reused), comparisonText(row.text).length), now());
+        return;
+      }
+      if (!(await reserveDailyWords(client, wordCount(comparisonText(row.text)), config.dailyWordLimit, now()))) {
+        console.error("highlight prediction deferred (non-fatal): daily word limit reached");
+        await deferToNextDay(client, key, attempt, now());
+        return;
+      }
+      const ranges = await requestPredictedHighlights(row.text, config, options.fetchImpl ?? fetch);
       await completePrediction(client, key, attempt, ranges, now());
     } catch (err) {
       const retryable = err instanceof HighlightModelError ? err.retryable : true;

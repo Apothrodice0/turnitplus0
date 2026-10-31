@@ -24,6 +24,8 @@ export type HighlightModelConfig = {
   ownerEmails: string[];
   timeoutMs: number;
   maxWords: number;
+  /** Words sent to the service per UTC day, across all reports and retries (lib/highlight-predictions.ts). */
+  dailyWordLimit: number;
   /** The Google identity a private Cloud Run service requires; null for a service that needs none. */
   identity: ServiceIdentity | null;
 };
@@ -34,6 +36,8 @@ const MAX_RANGES = 20_000;
 // 4 vCPU, plus a cold start. Longer documents keep their verified report and get no predictions.
 const DEFAULT_TIMEOUT_MS = 240_000;
 const DEFAULT_MAX_WORDS = 60_000;
+// About 2,000 s of 4 vCPU a day at the measured ~500 words/s: well under $1 a day, whatever happens.
+const DEFAULT_DAILY_WORD_LIMIT = 1_000_000;
 
 export function highlightModelConfig(env: NodeJS.ProcessEnv = process.env): HighlightModelConfig {
   const url = (env.HIGHLIGHT_MODEL_URL ?? "").trim();
@@ -41,6 +45,7 @@ export function highlightModelConfig(env: NodeJS.ProcessEnv = process.env): High
   const modelVersion = (env.HIGHLIGHT_MODEL_VERSION ?? "").trim();
   const timeoutMs = Number(env.HIGHLIGHT_MODEL_TIMEOUT_MS);
   const maxWords = Number(env.HIGHLIGHT_MODEL_MAX_WORDS);
+  const dailyWordLimit = Number(env.HIGHLIGHT_MODEL_DAILY_WORD_LIMIT);
   const productionAllowed = env.VERCEL_ENV !== "production" || env.HIGHLIGHT_MODEL_PRODUCTION_ENABLED === "1";
   const identity = serviceIdentityFromEnv(env);
   return {
@@ -52,6 +57,7 @@ export function highlightModelConfig(env: NodeJS.ProcessEnv = process.env): High
     ownerEmails: (env.HIGHLIGHT_MODEL_OWNER_EMAILS ?? "").split(",").map((email) => email.trim().toLowerCase()).filter(Boolean),
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS,
     maxWords: Number.isFinite(maxWords) && maxWords > 0 ? maxWords : DEFAULT_MAX_WORDS,
+    dailyWordLimit: Number.isFinite(dailyWordLimit) && dailyWordLimit >= 0 && env.HIGHLIGHT_MODEL_DAILY_WORD_LIMIT?.trim() ? dailyWordLimit : DEFAULT_DAILY_WORD_LIMIT,
     identity: identity === "INVALID" ? null : identity,
   };
 }

@@ -33,3 +33,12 @@ CREATE INDEX IF NOT EXISTS report_highlight_predictions_reuse
   ON report_highlight_predictions (account_id, model_version, text_sha256, status);
 CREATE INDEX IF NOT EXISTS report_highlight_predictions_due
   ON report_highlight_predictions (status, next_attempt_at);
+
+-- The daily usage ceiling: words sent to the model service per UTC day (YYYY-MM-DD), reserved before each call and
+-- never more than HIGHLIGHT_MODEL_DAILY_WORD_LIMIT, so spending stops at once when the day's budget is used. A call
+-- that does not fit waits for the next day. Holds counts only.
+CREATE TABLE IF NOT EXISTS highlight_model_usage_daily (
+  day TEXT PRIMARY KEY,
+  calls INTEGER NOT NULL,
+  words INTEGER NOT NULL
+);

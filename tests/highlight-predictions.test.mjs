@@ -385,6 +385,37 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   pass('P11 a stopped last attempt reads as finished; a stopped earlier attempt is retried once on open');
 }
 
+// ── P12. The daily word ceiling stops calls at once; a deferred prediction keeps its attempts and runs the next day ──
+{
+  const u = await subscriber('p12@example.com');
+  const today = new Date().toISOString().slice(0, 10);
+  const usedToday = async () => Number((await db.execute({ sql: 'SELECT COALESCE(SUM(words), 0) AS w FROM highlight_model_usage_daily WHERE day = ?', args: [today] })).rows[0].w);
+  const before = await usedToday();
+  assert.ok(before > 0, 'earlier calls today were counted');
+  process.env.HIGHLIGHT_MODEL_DAILY_WORD_LIMIT = String(before + 25);
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 0, end: 6 }], modelVersion: MODEL }), { status: 200 });
+  modelCalls = 0;
+  const fits = await postReport(u, { room: 0 });
+  const over = await quietly(() => postReport(u, { room: 1 }));
+  assert.equal(modelCalls, 1, 'the call that would pass the ceiling is never made');
+  assert.equal((await rowOf(fits.id)).status, 'complete');
+  const waiting = await rowOf(over.id);
+  assert.equal(waiting.status, 'pending');
+  assert.equal(Number(waiting.attempts), 0, 'waiting for the ceiling uses up no attempt');
+  assert.ok(Number(waiting.next_attempt_at) > Date.now() + 60_000, 'it waits for the next UTC day');
+  assert.ok((await usedToday()) <= before + 25);
+  const view = await quietly(() => getReport(u, over.id));
+  assert.equal(view.body.predictedHighlightsPending, true);
+  assert.equal(modelCalls, 1, 'a read on the same day does not call');
+  await db.execute({ sql: 'DELETE FROM highlight_model_usage_daily WHERE day = ?', args: [today] }); // a new day
+  await makeDue(over.id);
+  await getReport(u, over.id);
+  assert.equal(modelCalls, 2, 'the next day it runs');
+  assert.equal((await rowOf(over.id)).status, 'complete');
+  delete process.env.HIGHLIGHT_MODEL_DAILY_WORD_LIMIT;
+  pass('P12 the daily word ceiling stops calls at once; a deferred prediction keeps its attempts and runs the next day');
+}
+
 // ── P10. A database without the table behaves exactly as before ─────────────────────────────────────────────────────
 {
   const u = await subscriber('p10@example.com');
