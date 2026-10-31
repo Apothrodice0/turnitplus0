@@ -256,6 +256,8 @@ export type SimilarityReport = {
   predictedHighlightsPending?: boolean;
   /** The report's prediction finished without a result (the owner may start it again). Response-only, like predictedHighlights. */
   predictedHighlightsFailed?: boolean;
+  /** The report has no current prediction and may have one; the opened report page starts it. Response-only, like predictedHighlights. */
+  predictedHighlightsNotStarted?: boolean;
   id: number;
   submissionId: string;
   title: string;

@@ -20,8 +20,10 @@ import { comparisonText } from "./similarity-core";
  * A retryable failure waits (RETRY_DELAYS_MS); a further attempt starts from the sweep or from the owner's next read.
  *
  * NO REPORT LEFT WITHOUT A JOB. A report saved while the model was off or out of reach, or before the current model
- * version, has no current row; its owner opening the report page queues one under the same rules as a first save. There
- * is no other backfill: nothing walks old reports, and the daily ceiling covers these calls like any other.
+ * version, has no current row. Its owner's report page says so and, once it is really open in a browser, asks for one
+ * (startHighlightPrediction), under the same rules as a first save. Rendering the page writes nothing, because a link
+ * prefetch renders it too. There is no other backfill: nothing walks old reports, and the daily ceiling covers these
+ * calls like any other.
  *
  * THREE ANSWERS, NEVER CONFUSED. Pending (still coming), complete (a result, possibly with no passages) and failed. Only
  * a stored result the service really gave is complete; a finished failure, or a row that holds no readable result, is
@@ -257,9 +259,10 @@ export async function scheduleHighlightPrediction(
 
 /**
  * Adds the stored prediction to one outgoing report for its owner. The model is never called from the read itself. A
- * row for another model or another text answers nothing; `owner`, passed only by the report page, queues a report with
- * no current row (see NO REPORT LEFT WITHOUT A JOB). `retry` (the API read, not the page) lets a due prediction run after
- * the response, which is what finishes one when no scheduled sweep exists, as on a Preview deployment.
+ * row for another model or another text answers nothing; `owner`, passed only by the report page, marks a report that
+ * could have one as not started, and writes nothing (see NO REPORT LEFT WITHOUT A JOB). `retry` (the API read, not the
+ * page) lets a due prediction run after the response, which is what finishes one when no scheduled sweep exists, as on a
+ * Preview deployment.
  */
 export async function attachStoredPredictedHighlights(
   client: Client,
@@ -280,11 +283,7 @@ export async function attachStoredPredictedHighlights(
     const now = options.nowMs ?? Date.now();
     const textSha256 = highlightPredictionTextHash(report.text);
     if (!row || row.model_version !== config.modelVersion || row.text_sha256 !== textSha256) {
-      const owner = options.owner;
-      if (!owner || !(await predictionWanted(client, owner, report.text, report.features?.detectedLanguage, config))) return;
-      await enqueuePrediction(client, key, owner.id, config.modelVersion, textSha256, now);
-      report.predictedHighlightsPending = true;
-      if (options.retry) await runAfterResponse(() => processHighlightPrediction(key, { config, fetchImpl: options.fetchImpl }));
+      if (options.owner && (await predictionWanted(client, options.owner, report.text, report.features?.detectedLanguage, config))) report.predictedHighlightsNotStarted = true;
       return;
     }
     if (row.status === "complete") {
@@ -308,18 +307,31 @@ export async function attachStoredPredictedHighlights(
 }
 
 /**
- * The owner's "Try again" on a finished failure: a fresh set of attempts for the current model, run after the response.
- * False when there is nothing to start again (no row, another model, still pending or running, or complete). The daily
- * word ceiling still applies to every call it leads to.
+ * The report page asks for a prediction: one the report never got for this model and text, or the owner's "Try again" on
+ * a finished failure, which gets a fresh set of attempts. It runs after the response. False when there is nothing to
+ * start (not wanted for this report, still pending or running, or a finished result). The daily word ceiling applies to
+ * every call this leads to.
  */
-export async function retryFailedHighlightPrediction(
+export async function startHighlightPrediction(
   client: Client,
+  owner: SessionUser,
+  report: { text: unknown; detectedLanguage: unknown },
   key: HighlightPredictionKey,
   options: { config?: HighlightModelConfig; fetchImpl?: typeof fetch; nowMs?: number } = {},
 ): Promise<boolean> {
   const config = options.config ?? highlightModelConfig();
-  if (!config.enabled || !(await highlightPredictionTableExists(client))) return false;
+  if (typeof report.text !== "string" || !report.text || !(await predictionWanted(client, owner, report.text, report.detectedLanguage, config))) return false;
   const now = options.nowMs ?? Date.now();
+  const textSha256 = highlightPredictionTextHash(report.text);
+  const row = (await client.execute({
+    sql: "SELECT model_version, text_sha256 FROM report_highlight_predictions WHERE report_device_key = ? AND report_id = ?",
+    args: [key.deviceKey, key.reportId],
+  })).rows[0] as unknown as { model_version: string; text_sha256: string } | undefined;
+  if (!row || row.model_version !== config.modelVersion || row.text_sha256 !== textSha256) {
+    await enqueuePrediction(client, key, owner.id, config.modelVersion, textSha256, now);
+    await runAfterResponse(() => processHighlightPrediction(key, { config, fetchImpl: options.fetchImpl }));
+    return true;
+  }
   const result = await client.execute({
     sql: `UPDATE report_highlight_predictions
              SET status = 'pending', ranges_json = NULL, attempts = 0, lease_until = NULL, next_attempt_at = ?, updated_at = ?

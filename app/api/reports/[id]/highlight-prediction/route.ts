@@ -4,15 +4,15 @@ import { getReportsDbClient } from '../../../../../lib/reports-db';
 import { getSessionUser } from '../../../../../lib/auth-session';
 import { reportAccessRefusalFor } from '../../../../../lib/account-entitlements';
 import { findReportRowForUser } from '../../../../../lib/reports-repo';
-import { retryFailedHighlightPrediction } from '../../../../../lib/highlight-predictions';
+import { startHighlightPrediction } from '../../../../../lib/highlight-predictions';
 
 /**
- * POST /api/reports/[id]/highlight-prediction: the owner starts a finished, failed highlight prediction again
- * (lib/highlight-predictions.ts retryFailedHighlightPrediction). The report itself is never read or written; the
- * prediction runs after the response and the report page picks it up as it does any pending one.
+ * POST /api/reports/[id]/highlight-prediction: the opened report page starts a prediction the report never got, or the
+ * owner starts a failed one again (lib/highlight-predictions.ts startHighlightPrediction). The report is only read; the
+ * prediction runs after the response and the page picks it up as it does any pending one.
  *
  * Signed-in owner only: the report is found by (id, session user), so another account's report, an anonymous one and a
- * missing id are the same 404. 409 when there is nothing to start again (pending, running, complete, or no prediction).
+ * missing id are the same 404. 409 when there is nothing to start (not wanted for this report, pending, running, complete).
  */
 export const dynamic = 'force-dynamic';
 // The prediction runs after this response.
@@ -36,7 +36,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       if (accessRefusal) return json(403, { error: accessRefusal.message, code: accessRefusal.code });
       const row = await findReportRowForUser(client, id, sessionUser.id);
       if (!row) return json(404, { error: 'Report not found' });
-      const started = await retryFailedHighlightPrediction(client, { deviceKey: row.device_key, reportId: id });
+      const report = JSON.parse(row.payload_json) as { text?: unknown; features?: { detectedLanguage?: unknown } };
+      const started = await startHighlightPrediction(client, sessionUser, { text: report.text, detectedLanguage: report.features?.detectedLanguage }, { deviceKey: row.device_key, reportId: id });
       return started ? json(202, { pending: true }) : json(409, { error: 'Nothing to retry' });
     } finally {
       client.close();

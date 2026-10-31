@@ -198,17 +198,23 @@ export function ReportDetailShell({
   }, [id, predictionsPending]);
   // A prediction that finished without a result says so, with a way to start it again; it never reads as "no passages".
   const [predictionRetrySending, setPredictionRetrySending] = useState(false);
-  async function retryPredictions() {
+  async function startPredictions() {
     setPredictionRetrySending(true);
     try {
       const response = await fetch(`/api/reports/${encodeURIComponent(id)}/highlight-prediction`, { method: "POST" });
-      if (response.status === 202) setReport((current) => (current ? { ...current, predictedHighlightsFailed: undefined, predictedHighlightsPending: true } : current));
+      if (response.status === 202) setReport((current) => (current ? { ...current, predictedHighlightsFailed: undefined, predictedHighlightsNotStarted: undefined, predictedHighlightsPending: true } : current));
     } catch {
       // Offline or refused: the notice stays, so the owner can try again.
     } finally {
       setPredictionRetrySending(false);
     }
   }
+  // A report that never got a prediction starts one here, from the page really being open: a prefetch never mounts this.
+  const predictionsNotStarted = Boolean(report?.predictedHighlightsNotStarted);
+  useEffect(() => {
+    if (predictionsNotStarted) void startPredictions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, predictionsNotStarted]);
 
   // The server now sends the saved payload without waiting for expensive
   // read-time historical/family enrichment. Render that payload immediately
@@ -577,7 +583,7 @@ export function ReportDetailShell({
           <strong>—</strong>
           <div>
             <p>Predicted passages could not be prepared for this document. The verified similarity results are complete and unaffected.</p>
-            <button className="button subtle" type="button" onClick={retryPredictions} disabled={predictionRetrySending}>
+            <button className="button subtle" type="button" onClick={startPredictions} disabled={predictionRetrySending}>
               {predictionRetrySending ? "Starting…" : "Try again"}
             </button>
           </div>
