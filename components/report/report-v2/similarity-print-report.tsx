@@ -24,7 +24,7 @@ import {
   type PrintSourceTone,
   type ReportSubmitter,
 } from "@/lib/similarity-print-layout";
-import { buildPrintHighlights, buildPrintPredicted, type PrintHighlight } from "./print-highlights";
+import { buildDisplayedPredicted, buildPrintHighlights, type PrintHighlight } from "./print-highlights";
 import { unifiedPercentText, type UnifiedSimilarity } from "@/lib/system2-unified";
 
 /**
@@ -609,7 +609,7 @@ export function SimilarityPrintReport({
     const highlights = buildPrintHighlights(report, vm, rankById);
     // Pagination sees verified highlights only, so a prediction can never move a page break.
     const pages = paginateManuscriptForPrint(report.text ?? "", highlights.map((h) => ({ start: h.start, end: h.end })));
-    return { vm, ranked, rankById, highlights, predicted: buildPrintPredicted(report), pages };
+    return { vm, ranked, rankById, highlights, predicted: buildDisplayedPredicted(report), pages };
   }, [report]);
   if (!model) return null;
   const { vm, ranked, rankById, highlights, predicted, pages } = model;

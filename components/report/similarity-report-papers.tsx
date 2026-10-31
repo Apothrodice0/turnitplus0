@@ -15,6 +15,7 @@ import type { ExternalAcademicEvidence } from "@/lib/academic-search/types";
 import { similarityScoreBand } from "@/lib/ai-core";
 import { mergeAdjacentPositions, reportScoringNormalizationVersion, tokenSpans } from "@/lib/similarity-core";
 import { resolveCompletionView } from "@/lib/report-v2-view";
+import { usablePredictedFragment } from "@/lib/predicted-highlight-fragments";
 import {
   PRIMARY_SIMILARITY_BAND_LABELS,
   archiveOverlapScore,
@@ -1230,7 +1231,9 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
   // passages only ever fill the gaps left by every verified channel above, so
   // a word is never drawn twice and a predicted span can never take a verified
   // word's source. Clipped, not dropped: a span that partly overlaps a verified
-  // match still contributes its remaining words.
+  // match still contributes its remaining words, when they still read as a
+  // passage (lib/predicted-highlight-fragments.ts). A span no match touches is
+  // drawn as the model returned it.
   const verifiedRanges = [...accepted];
   (report.predictedHighlights ?? []).forEach((predicted) => {
     let cursor = predicted.start;
@@ -1239,7 +1242,8 @@ export function findHighlightRanges(report: SimilarityReport, options: { include
       .sort((left, right) => left.start - right.start);
     [...blockers, { start: predicted.end, end: predicted.end }].forEach((blocker) => {
       if (blocker.start > cursor) {
-        accepted.push({ start: cursor, end: blocker.start, sourceIndex: -1, color: MATCHED_PASSAGE_COLOR, label: "", kind: "predicted" });
+        const piece = blockers.length === 0 ? { start: cursor, end: blocker.start } : usablePredictedFragment(report.text, cursor, blocker.start);
+        if (piece) accepted.push({ ...piece, sourceIndex: -1, color: MATCHED_PASSAGE_COLOR, label: "", kind: "predicted" });
       }
       cursor = Math.max(cursor, blocker.end);
     });

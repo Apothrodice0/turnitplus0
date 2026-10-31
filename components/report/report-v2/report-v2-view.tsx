@@ -35,6 +35,7 @@ import {
 } from "@/lib/report-v2-view";
 import { ReportPageFooter, ReportPageHeader } from "../report-page-chrome";
 import { buildHighlightedPieces, findHighlightRanges, HighlightLegend } from "../similarity-report-papers";
+import { buildDisplayedPredicted } from "./print-highlights";
 import { reportScoringNormalizationVersion } from "@/lib/similarity-core";
 
 /**
@@ -1039,6 +1040,14 @@ function renderManuscriptWindow(
  * rather than through it, so a single highlighted match is never split
  * across two page cards.
  */
+/** One quiet line under the manuscript heading: what the dashed underlines are (the PDF key's words), or that they are still coming. */
+function PredictedPassagesNote({ report }: { report: SimilarityReport }) {
+  const shown = useMemo(() => buildDisplayedPredicted(report).length > 0, [report]);
+  if (shown) return <p className="rv2ws-predicted-note"><span className="predicted-highlight">Dashed underlines</span> mark unverified predicted passages.</p>;
+  if (report.predictedHighlightsPending) return <p className="rv2ws-predicted-note">Predicted passages are still being prepared.</p>;
+  return null;
+}
+
 function WorkspaceManuscript({
   report,
   vm,
@@ -1065,6 +1074,7 @@ function WorkspaceManuscript({
     () => paginateManuscriptText(text, runs.map((p) => ({ start: p.charStart!, end: p.charEnd! })), undefined, scoringNormalizationVersion),
     [text, runs, scoringNormalizationVersion],
   );
+  const predicted = useMemo(() => buildDisplayedPredicted(report), [report]);
 
   if (text.length === 0) {
     return <p className="rv2-empty">Your submitted text is not available for inline highlighting.</p>;
@@ -1083,7 +1093,7 @@ function WorkspaceManuscript({
               explicit. */}
           <p className="rv2ws-page-number">Manuscript page {pageIndex + 1} of {pageRanges.length}</p>
           <div className="rv2-doc rv2ws-manuscript">
-            {renderManuscriptWindow(text, runs, range.start, range.end, sourceIndexById, activePassageId, onSelectPassage, report.predictedHighlights)}
+            {renderManuscriptWindow(text, runs, range.start, range.end, sourceIndexById, activePassageId, onSelectPassage, predicted)}
           </div>
         </article>
       ))}
@@ -1207,6 +1217,7 @@ export function ReportV2Workspace({
           <div className="rv2ws-match-review-heading">
             <p className="paper-kicker">MATCH REVIEW</p>
             <h3>Highlighted manuscript</h3>
+            <PredictedPassagesNote report={report} />
           </div>
           <WorkspaceManuscript report={report} vm={vm} activePassageId={activePassageId} onSelectPassage={selectPassage} />
         </div>

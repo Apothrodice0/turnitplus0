@@ -21,11 +21,12 @@ export function buildPrintHighlights(report: SimilarityReport, vm: ReportV2ViewM
 }
 
 /**
- * TURNITIN HIGHLIGHT MODEL prototype (lib/highlight-model.ts): the model-predicted passages, already clipped to the gaps
- * between verified matches. Kept apart from buildPrintHighlights so they never get a number, a source or a page-layout
- * role; empty for every viewer the model is not shown to.
+ * TURNITIN HIGHLIGHT MODEL (lib/highlight-model.ts): the model-predicted passages as drawn, already clipped to the gaps
+ * between verified matches. The one list both the screen and the PDF draw, so the two cannot differ. Kept apart from
+ * buildPrintHighlights so they never get a number, a source or a page-layout role; empty for every viewer the model is
+ * not shown to.
  */
-export function buildPrintPredicted(report: SimilarityReport): PredictedHighlightRange[] {
+export function buildDisplayedPredicted(report: SimilarityReport): PredictedHighlightRange[] {
   if (!report.predictedHighlights?.length) return [];
   return findHighlightRanges(report, { includeWikipedia: Boolean(report.viewerIsAdmin) }).filter((r) => r.kind === "predicted").map(({ start, end }) => ({ start, end }));
 }
