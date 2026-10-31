@@ -63,6 +63,12 @@ export { isCorpusSourceMatchingEnabled };
  * document_identities.account_id, users, or emails directly.
  */
 
+/**
+ * Representations held out of every match while their origin is investigated (owner decision 2026-10-31). The row itself is
+ * left untouched, so taking an id out of this list is the whole release.
+ */
+export const ISOLATED_REPRESENTATION_IDS: ReadonlySet<string> = new Set(["783646f2-a38e-4640-8c96-bda16fc81428"]);
+
 /** Reuses lib/document-family.ts's FamilyMatchType vocabulary values deliberately (this phase's own task description, section 12) — not imported directly, since family membership and corpus-match evidence are different concerns that happen to share the same two meaningful values; SEED does not apply here. */
 export type UserSubmissionMatchType = "EXACT_CANONICAL_MATCH" | "STRONG_TEXT_MATCH";
 
@@ -522,7 +528,7 @@ export async function matchAgainstUserSubmissionCorpus(
     }
   }
 
-  const boundedCandidates = [...candidateById.values()].slice(0, config.maxCandidates);
+  const boundedCandidates = [...candidateById.values()].filter((candidate) => !ISOLATED_REPRESENTATION_IDS.has(candidate.representationId)).slice(0, config.maxCandidates);
   const matches: UserSubmissionMatch[] = [];
   // params.corpusSourceMatchingEnabled, when the caller captured it once for
   // its whole computation, is used verbatim; otherwise a single internal

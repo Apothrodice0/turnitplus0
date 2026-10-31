@@ -5,7 +5,11 @@ import path from "path";
 import { createClient } from "@libsql/client";
 import { applyMigrationsLibsql } from "../lib/ingest.js";
 import { createPendingReportAdmissionJob, processReportAdmissionJob } from "../lib/corpus-admission-report-integration.ts";
-import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
+import { ISOLATED_REPRESENTATION_IDS, matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
+import { reEvaluateCorpusAdmissionCandidate } from "../lib/corpus-admission-gate.ts";
+import { deleteAllReportDataForAccount } from "../lib/account-deletion.ts";
+import { canonicalSha256 } from "../lib/document-identity.ts";
+import { recordCorpusShingles, CORPUS_FINGERPRINT_VERSION } from "../lib/user-submission-corpus.ts";
 import { cleanupExpiredSubscriptionReports } from "../lib/subscription-expiry-cleanup.ts";
 import { reportAccessRefusalFor, resetEntitlementTableCacheForTest } from "../lib/account-entitlements.ts";
 import { COMPARISON_SOURCE_TABLES, REPORT_ARTIFACT_TABLES } from "../lib/comparison-source-lifecycle.ts";
@@ -132,4 +136,64 @@ test("expiry refuses the report at once, deletes the report and its artifacts, a
   assert.deepEqual(sourceAfter, sourceBefore, "the comparison source has its own lifecycle and is untouched");
   const stillMatched = await match(B, A_TEXT);
   assert.equal(stillMatched.status, "MATCHED", "retained source text is still searchable after the report expired");
+});
+
+test("account deletion removes the customer's reports and leaves accepted comparison sources matchable, the same as expiry", async () => {
+  const C = await account();
+  const text = article(2202);
+  const { job, reportId } = await upload(C, text);
+  assert.equal((await run(job)).outcome, "succeeded");
+  const sources = await n("SELECT COUNT(*) AS n FROM corpus_admission_content_store");
+  await deleteAllReportDataForAccount(client, C, { preserveActivelyPromotedRepresentations: true });
+  assert.equal(await n("SELECT COUNT(*) AS n FROM saved_reports WHERE id = ?", reportId), 0);
+  assert.equal(await n("SELECT COUNT(*) AS n FROM corpus_admission_content_store"), sources);
+  assert.equal((await match(B, text)).status, "MATCHED");
+});
+
+const sqlFile = (name) => fs.readFileSync(path.join(repoRoot, "scripts", "corpus", name), "utf8").replace(/^--.*$/gm, "").split(";").map((s) => s.trim()).filter(Boolean);
+const OLD_CONSENT = '{"kind":"PER_USER_CONSENT","consented":true}';
+
+test("relabelling a legacy upload records that nobody was asked, changes no match, and is exactly reversible", async () => {
+  // what the old upload path wrote, on the source A uploaded
+  await client.execute("UPDATE corpus_admission_content_store SET retention_basis = 'CONSENT_GRANTED'");
+  await client.execute({ sql: "UPDATE corpus_admission_decisions SET consent_metadata = ? WHERE source_ref LIKE 'report-upload:%'", args: [OLD_CONSENT] });
+  await client.execute({ sql: "UPDATE corpus_admission_content_store SET retention_basis = 'LICENSED_REUSE' WHERE decision_id IN (SELECT id FROM corpus_admission_decisions WHERE source_ref NOT LIKE 'report-upload:%')" });
+  const before = await match(B, A_TEXT);
+  assert.equal(before.status, "MATCHED");
+  const eligibility = "SELECT COUNT(*) AS n FROM corpus_admission_promotions WHERE status = 'indexed'";
+  const promoted = await n(eligibility);
+  await client.batch(sqlFile("relabel-legacy-upload-provenance.sql"), "write");
+  assert.equal(await n("SELECT COUNT(*) AS n FROM corpus_admission_content_store WHERE retention_basis = 'CONSENT_GRANTED'"), 0);
+  assert.equal(await n("SELECT COUNT(*) AS n FROM corpus_admission_decisions WHERE consent_metadata LIKE '%consented%'"), 0);
+  assert.deepEqual(await match(B, A_TEXT), before, "the same match, field for field");
+  assert.equal(await n(eligibility), promoted);
+  const decision = String((await client.execute("SELECT id FROM corpus_admission_decisions WHERE decision = 'ACCEPT' AND content_store_id IS NOT NULL LIMIT 1")).rows[0].id);
+  const reviewed = await reEvaluateCorpusAdmissionCandidate(client, { decisionId: decision, openConnection });
+  assert.notEqual(reviewed.reasonCodes?.includes("RETENTION_REQUIREMENT_UNMET"), true, "a relabelled source still passes the retention gate");
+  await client.batch(sqlFile("relabel-legacy-upload-provenance.rollback.sql"), "write");
+  assert.equal(await n("SELECT COUNT(*) AS n FROM corpus_admission_content_store WHERE retention_basis = 'LEGACY_NOT_ASKED'"), 0);
+  assert.equal(await n("SELECT COUNT(*) AS n FROM corpus_admission_decisions WHERE consent_metadata LIKE '%legacy%'"), 0);
+});
+
+test("the isolated document matches nobody, while an identical unlinked document still behaves as before", async () => {
+  const [isolated] = ISOLATED_REPRESENTATION_IDS;
+  const seed = async (id, text) => {
+    await client.execute({
+      sql: `INSERT INTO corpus_document_representations (id, canonical_sha256, canonical_text, word_count, language, canonicalization_version, extractor_version, first_seen_at, created_at)
+            VALUES (?,?,?,?,?,?,?,datetime('now','-30 days'),datetime('now','-30 days'))`,
+      args: [id, canonicalSha256(text), text, 3300, null, "canonical-text-v1", null],
+    });
+    await recordCorpusShingles(client, id, text, CORPUS_FINGERPRINT_VERSION);
+  };
+  const lookup = (accountId, text) => matchAgainstUserSubmissionCorpus(client, { accountId, canonicalText: text });
+  const held = article(3303), open = article(4404);
+  await seed(isolated, held);
+  await seed("unlinked-control", open);
+  await matureCorpusBackings(client);
+  const control = await lookup(null, open);
+  assert.equal(control.status, "MATCHED", "the fixture is reachable by an anonymous lookup");
+  assert.equal(control.matches[0].relationshipType, "UNKNOWN_RELATIONSHIP");
+  assert.equal((await lookup(null, held)).status, "NO_HISTORICAL_MATCH", "anonymous lookup");
+  assert.equal((await lookup(B, held)).status, "NO_HISTORICAL_MATCH", "signed-in lookup");
+  assert.equal(await n("SELECT COUNT(*) AS n FROM corpus_document_representations WHERE id = ?", isolated), 1, "the row stays for the investigation");
 });

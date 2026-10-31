@@ -81,9 +81,10 @@ export type CorpusAcquisitionMethod = "MANUAL_UPLOAD" | "BULK_IMPORT_DOWNLOAD" |
 /**
  * SERVICE_POLICY: a customer upload retained under TurnitPlus's published comparison-corpus policy (the policy version is in
  * the decision's consent_metadata). It is not a record that the customer was asked. CONSENT_GRANTED is only for an explicit,
- * recorded per-customer consent, which no current flow collects; rows labelled so before 2026-10-31 were not asked either.
+ * recorded per-customer consent, which no current flow collects. LEGACY_NOT_ASKED: an upload retained before 2026-10-31 under a
+ * hard-coded consent label, with nobody asked (scripts/corpus/relabel-legacy-upload-provenance.sql).
  */
-export type CorpusRetentionBasis = "LICENSED_REUSE" | "CONSENT_GRANTED" | "SERVICE_POLICY" | "PUBLIC_DOMAIN" | "FAIR_USE_CLAIMED" | "UNRESOLVED";
+export type CorpusRetentionBasis = "LICENSED_REUSE" | "CONSENT_GRANTED" | "SERVICE_POLICY" | "LEGACY_NOT_ASKED" | "PUBLIC_DOMAIN" | "FAIR_USE_CLAIMED" | "UNRESOLVED";
 
 /**
  * Per-candidate provenance/licensing record for a bulk-import candidate (the
