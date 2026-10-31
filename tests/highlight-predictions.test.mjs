@@ -469,7 +469,7 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
 
 // ── P14. A finished failure can be started again by its owner, and only by its owner ────────────────────────────────
 {
-  const u = await subscriber('p14@example.com');
+  const u = await subscriber('p14@example.com', 4);
   const other = await subscriber('p14b@example.com');
   modelAnswer = () => new Response('', { status: 404 });
   const r = await quietly(() => postReport(u, { room: 0 }));
@@ -494,10 +494,19 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   assert.deepEqual(view.predictedHighlights, [{ start: 4, end: 10 }]);
   assert.equal(view.predictedHighlightsFailed, undefined);
   assert.equal(await retry(u, r.id), 409, 'nothing to retry once complete');
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [], modelVersion: MODEL }), { status: 200 });
+  const none = await postReport(u, { room: 2 });
+  const noneView = (await getReport(u, none.id)).body;
+  assert.equal((await rowOf(none.id)).status, 'complete');
+  assert.deepEqual(noneView.predictedHighlights, [], 'a genuine result with no passages is a finished result');
+  assert.equal(noneView.predictedHighlightsPending, undefined);
+  assert.equal(noneView.predictedHighlightsFailed, undefined, 'and is never reported as a failure');
+  assert.equal(await retry(u, none.id), 409);
+  assert.equal(modelCalls, 2);
   modelAnswer = () => new Response('', { status: 503 });
   const waiting = await quietly(() => postReport(u, { room: 1 }));
   assert.equal(await retry(u, waiting.id), 409, 'a pending prediction is not started early');
-  assert.equal(modelCalls, 2);
+  assert.equal(modelCalls, 3);
   const stored = (await db.execute({ sql: 'SELECT payload_json FROM saved_reports WHERE id = ?', args: [r.id] })).rows[0].payload_json;
   assert.equal(stored.includes('predictedHighlights'), false, 'the saved report is never written');
   pass('P14 the owner can start a failed prediction again (202, then complete); signed-out 401, another account 404, nothing to retry 409');
