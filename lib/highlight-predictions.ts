@@ -221,9 +221,12 @@ export async function attachStoredPredictedHighlights(
       return;
     }
     if (row.status === "failed") return;
-    report.predictedHighlightsPending = true;
     const now = options.nowMs ?? Date.now();
     const due = row.status === "pending" ? Number(row.next_attempt_at) <= now : row.lease_until !== null && Number(row.lease_until) <= now;
+    // A last attempt whose worker was stopped (its lease ran out) can never be claimed again: finished, not pending,
+    // even before a sweep closes it (Preview has no scheduled sweep).
+    if (row.status === "running" && due && Number(row.attempts) >= MAX_ATTEMPTS) return;
+    report.predictedHighlightsPending = true;
     if (options.retry && due) await runAfterResponse(() => processHighlightPrediction(key, { config, fetchImpl: options.fetchImpl }));
   } catch (err) {
     console.error("highlight prediction not read (non-fatal):", err instanceof Error ? err.name : "unknown");

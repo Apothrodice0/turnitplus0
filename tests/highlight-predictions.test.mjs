@@ -362,6 +362,29 @@ const subscriber = async (email, rooms = 4) => { const u = await signup(email); 
   pass('P9 the sweep finishes due predictions, closes exhausted ones, and is protected by CRON_SECRET');
 }
 
+// ── P11. A worker stopped mid-call (function time limit) never leaves a report waiting forever, even with no sweep ──
+{
+  const u = await subscriber('p11@example.com');
+  modelAnswer = () => new Response('', { status: 503 });
+  const last = await quietly(() => postReport(u, { room: 0 }));
+  const earlier = await quietly(() => postReport(u, { room: 1 }));
+  const stop = (id, attempts) => db.execute({ sql: "UPDATE report_highlight_predictions SET status = 'running', attempts = ?, lease_until = ? WHERE report_id = ?", args: [attempts, Date.now() - 1, id] });
+  await stop(last.id, 5);
+  await stop(earlier.id, 2);
+  modelAnswer = () => new Response(JSON.stringify({ ranges: [{ start: 0, end: 6 }] }), { status: 200 });
+  modelCalls = 0;
+  const lastView = await getReport(u, last.id);
+  assert.equal(lastView.body.predictedHighlightsPending, undefined, 'a stopped last attempt is finished, not pending');
+  assert.equal(lastView.body.predictedHighlights, undefined);
+  assert.equal(modelCalls, 0, 'and it is never called again');
+  const earlierView = await getReport(u, earlier.id);
+  assert.equal(earlierView.body.predictedHighlightsPending, true, 'a stopped earlier attempt is retried on open');
+  assert.equal(modelCalls, 1);
+  assert.equal((await rowOf(earlier.id)).status, 'complete');
+  assert.equal(Number((await rowOf(earlier.id)).attempts), 3);
+  pass('P11 a stopped last attempt reads as finished; a stopped earlier attempt is retried once on open');
+}
+
 // ── P10. A database without the table behaves exactly as before ─────────────────────────────────────────────────────
 {
   const u = await subscriber('p10@example.com');
