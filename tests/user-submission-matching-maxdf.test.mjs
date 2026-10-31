@@ -17,6 +17,7 @@ import {
 } from "../lib/user-submission-corpus.ts";
 import { matchAgainstUserSubmissionCorpus as _matchAgainstUserSubmissionCorpus, USER_SUBMISSION_MATCH_THRESHOLDS } from "../lib/user-submission-matching.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 // Phase A safe-by-default maturity: this whole suite predates the 7-day corpus
 // activation clock and every test seeds its sources (and boilerplate/revoked

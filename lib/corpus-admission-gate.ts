@@ -196,7 +196,8 @@ function retentionResolvedFor(consent: CorpusConsentEvidence): boolean {
 }
 
 function retentionBasisFor(consent: CorpusConsentEvidence): string {
-  return consent.kind === "PER_USER_CONSENT" ? "CONSENT_GRANTED" : consent.provenance.retentionBasis;
+  if (consent.kind !== "PER_USER_CONSENT") return consent.provenance.retentionBasis;
+  return consent.consented === true ? "CONSENT_GRANTED" : "UNRESOLVED";
 }
 
 function isSqliteBusyError(err: unknown): boolean {

@@ -23,6 +23,7 @@ import {
   EVIDENCE_INTERPRETATION_VERSION,
   EVIDENCE_INTERPRETATION_KINDS,
 } from '../lib/evidence-interpretation/index.ts';
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * REPORT V2 — WIRE EVIDENCE INTERPRETATION INTO REAL REPORTS.

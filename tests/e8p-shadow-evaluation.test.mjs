@@ -12,6 +12,7 @@ import { runHistoricalMatchShadowEvaluation } from "../lib/e8p-shadow-evaluation
 import { runAfterResponse } from "../lib/run-after-response.ts";
 import { PROPOSED_ACCEPTANCE_POLICY_VERSION, PROPOSED_ROBUST_CORRESPONDENCE_VERSION, PROPOSED_DISTINCTIVENESS_MODEL_VERSION } from "../lib/e8o-historical-match-policy.ts";
 import { HIST_DISTINCTIVE_DOCUMENT, LONG_BLOCK, MANY_SHORT_COMMON_OVERLAPS, HIST_GENERIC_DOCUMENT, SECONDARY_REVIEW_DOCUMENT } from "../lib/e8k-calibration-fixtures.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");

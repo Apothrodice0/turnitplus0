@@ -15,6 +15,7 @@ import { getOrComputeHistoricalMatchSnapshot } from '../lib/report-historical-ma
 import { selfHealUnifiedSimilarity } from '../lib/report-primary-similarity.ts';
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { withTestIdentity } from './helpers/test-signup.mjs';
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase 4B, Part A: end-to-end proof that computeUnifiedSimilarity()'s

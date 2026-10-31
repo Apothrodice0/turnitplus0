@@ -30,6 +30,7 @@ import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 // lazily inside the tests that need it, so a missing export fails ONLY those
 // tests instead of failing this whole file at import time.
 import * as interpretationWiring from "../lib/report-evidence-interpretation.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * AUTHORITATIVE FINALIZER <-> EVIDENCE INTERPRETATION CONSISTENCY.

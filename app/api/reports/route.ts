@@ -1627,9 +1627,9 @@ export async function POST(request: Request) {
       // integration.ts's runReportAdmissionRetrySweep) can find and
       // process instead. Product decision: corpus-admission eligibility is
       // mandatory for every authenticated account, no per-account
-      // preference can block it — createPendingReportAdmissionJob's own
-      // CORPUS_ADMISSION_ENABLED flag check is the only remaining gate
-      // (still off by default), and processReportAdmissionJob below no
+      // preference can block it — superseded: customer retention is off
+      // (lib/customer-corpus-policy.ts), so createPendingReportAdmissionJob
+      // returns null on every hosted deployment. processReportAdmissionJob below no
       // longer re-checks or can be blocked by users.corpus_reuse_consented_at
       // either (see that function's own header comment) — that column is
       // now a vestigial historical timestamp (db/schema.ts).
@@ -1724,12 +1724,8 @@ export async function POST(request: Request) {
             // checks) against the job row already created SYNCHRONOUSLY
             // above (before this deferred callback ever started — see that
             // call site's own comment for why), and records its own audit
-            // trail, entirely behind CORPUS_ADMISSION_ENABLED (off by
-            // default). Product decision: corpus-admission eligibility is
-            // mandatory for every authenticated account — no per-account
-            // preference gates it any more, so there is no consent re-check
-            // here (see lib/corpus-admission-report-integration.ts's own
-            // header comment). As of the automatic-
+            // trail, behind lib/customer-corpus-policy.ts: no job exists for a
+            // customer upload today, so this does nothing. As of the automatic-
             // promotion fix, processReportAdmissionJob also immediately
             // stages and attempts to promote a fresh ACCEPT into the real
             // reusable corpus (never the account-linked

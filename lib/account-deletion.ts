@@ -1,4 +1,6 @@
 import { deleteOrphanedHighlightPredictions } from "./highlight-predictions";
+import { applyRetainedCorpusPurge } from "./customer-corpus-purge";
+import { deleteReportDerivedRecords } from "./report-derived-records";
 import type { Client } from "@libsql/client";
 import { buildReportAdmissionSourceRef } from "./corpus-admission-source-ref";
 import { randomUUID } from "node:crypto";
@@ -144,6 +146,12 @@ export async function deleteAllReportDataForAccount(
      * row of the account, exactly as before.
      */
     savedAtOrBefore?: string;
+    /**
+     * Also remove this account's manuscript text from the retained corpus, with every index of it
+     * (lib/customer-corpus-purge.ts). Set by subscription expiry and by account deletion: the customer's document data goes
+     * with them, whether or not its report still exists. Unset for the developer room reset.
+     */
+    purgeRetainedCorpusContent?: boolean;
   } = {},
 ): Promise<DeleteAccountDataResult> {
   const cutoff = options.savedAtOrBefore ?? null;
@@ -183,6 +191,9 @@ export async function deleteAllReportDataForAccount(
       });
     }
   }
+
+  // Search diagnostics and shadow evaluations hold text derived from the manuscript, and nothing cascades to them.
+  await deleteReportDerivedRecords(client, reports);
 
   // 1b. Corpus-admission bookkeeping — same source_ref format
   // deleteReportCorpusAdmissionData always used, same accepted-content guard
@@ -303,6 +314,8 @@ export async function deleteAllReportDataForAccount(
     await client.execute({ sql: `DELETE FROM corpus_document_representations WHERE id IN (${placeholders})`, args: chunk });
   }
 
+  if (options.purgeRetainedCorpusContent) await applyRetainedCorpusPurge(client, { accountId });
+
   return { reportsDeleted: reports.length, identitiesProcessed: identityIds.length };
 }
 
@@ -315,7 +328,7 @@ export async function deleteAllReportDataForAccount(
  * the developer rooms-reset endpoint reuses.
  */
 export async function deleteAccountData(client: Client, accountId: string): Promise<DeleteAccountDataResult> {
-  return deleteAllReportDataForAccount(client, accountId);
+  return deleteAllReportDataForAccount(client, accountId, { purgeRetainedCorpusContent: true });
 }
 
 /**

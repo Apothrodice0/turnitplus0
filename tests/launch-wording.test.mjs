@@ -20,16 +20,15 @@ test("the legal pages do not describe the old free product", async () => {
 
 test("retention says what happens when a subscription ends", async () => {
   const page = await read("app/page.tsx");
-  assert.match(page, /When a subscription expires, its reports are deleted from TurnitPlus's database/);
+  assert.match(page, /When a subscription expires, its reports and the document data derived from them are deleted from TurnitPlus's database/);
   assert.match(page, /A suspended subscription's reports are kept, but cannot be opened until it is restored/);
   assert.match(page, /Reports are deleted when a subscription expires, so keep copies/);
 });
 
-test("the comparison collection is disclosed, including that deletion does not remove accepted text", async () => {
+test("customers are told their documents are not compared against other customers' (lib/customer-corpus-policy.ts)", async () => {
   const page = await read("app/page.tsx");
-  assert.match(page, /may be added to TurnitPlus's comparison collection/);
-  assert.match(page, /after 7 days it can be matched against other customers' documents/);
-  assert.match(page, /does not remove text already accepted into the collection/);
+  assert.match(page, /they are not added to any collection that other customers' documents are compared against/);
+  assert.doesNotMatch(page, /comparison collection/);
 });
 
 test("the site no longer says every result is direct evidence: estimates and predictions are named as such", async () => {

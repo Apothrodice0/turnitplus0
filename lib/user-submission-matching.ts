@@ -1,3 +1,4 @@
+import { customerCorpusRetentionAuthorized } from "./customer-corpus-policy";
 import type { Client } from "@libsql/client";
 import { tokens } from "./similarity-core";
 import { canonicalSha256 } from "./document-identity";
@@ -564,6 +565,9 @@ export async function matchAgainstUserSubmissionCorpus(
       accountId: params.accountId,
       excludeDocumentIdentityId: params.documentIdentityId ?? null,
     });
+    // No customer is matched against another customer's text (lib/customer-corpus-policy.ts). Only the viewer's own earlier
+    // submissions go on from here; the independent archive is matched by its own path.
+    if (!customerCorpusRetentionAuthorized() && !ownership.hasSameAccountSubmission) continue;
     const hasNoRealOwnership = !ownership.hasSameAccountSubmission && ownership.otherAccountSubmissionCount === 0;
 
     let relationshipType: RelationshipType;

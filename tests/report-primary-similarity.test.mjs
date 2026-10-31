@@ -14,6 +14,7 @@ import { resolvePrimarySimilaritySummary, resolvePersistedSimilarityDisplay, sel
 import { findRoomOccupant } from "../lib/reports-repo.ts";
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { CORPUS_FINGERPRINT_VERSION, CANONICALIZATION_VERSION } from "../lib/user-submission-corpus.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Release-hardening audit finding SIM-02, superseded by SIM-03: SIM-02 gave

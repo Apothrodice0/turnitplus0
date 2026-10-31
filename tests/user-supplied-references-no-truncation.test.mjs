@@ -19,6 +19,7 @@ import * as reportsRoute from "../app/api/reports/route.ts";
 import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
 import { withTestIdentity } from "./helpers/test-signup.mjs";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 // ── DB setup FIRST (before any test) — see tests/user-supplied-references.test.mjs ──
 const dbFile = path.join(path.resolve("."), "test_user_supplied_refs_notrunc.db");

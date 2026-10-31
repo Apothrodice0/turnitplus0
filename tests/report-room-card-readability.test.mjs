@@ -27,6 +27,7 @@ import { tryDecodeReportFromPersistence, isEvidenceInterpretationCustomerReadabl
 import { computeUnifiedSimilarity } from "../lib/unified-similarity.ts";
 import { compactUnifiedSimilarityForPersistence } from "../lib/unified-similarity-persistence.ts";
 import { isCompactEvidenceInterpretation } from "../lib/evidence-interpretation/persistence.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 const ssrStubs = await import("./helpers/ssr-next-stubs.mjs");
 const roomPage = await import("../app/reports/rooms/[room]/page.tsx");

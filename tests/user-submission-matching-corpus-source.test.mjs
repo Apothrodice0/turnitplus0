@@ -10,6 +10,7 @@ import { indexDocumentSubmissionIntoCorpus } from "../lib/user-submission-corpus
 import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
 import { runCorpusAdmissionPromotionSweep } from "../lib/corpus-admission-promotion.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * The TURNITPLUS_CORPUS_SOURCE classification branch in

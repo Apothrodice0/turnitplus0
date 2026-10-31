@@ -41,6 +41,7 @@ import {
   resetImportedSimilarityEvidencePackageCacheForTest,
   resetImportedSimilarityEvidenceCandidateIndexCacheForTest,
 } from "../lib/imported-similarity-evidence/index.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 const ssrStubs = await import("./helpers/ssr-next-stubs.mjs");
 const reportPage = await import("../app/reports/[id]/page.tsx");

@@ -7,6 +7,7 @@ import { applyMigrationsLibsql } from '../lib/ingest.js';
 import * as sweepRoute from '../app/api/internal/corpus-admission-sweep/route.ts';
 import { resetAuthRateForTest } from '../lib/rate-limit.js';
 import { createPendingReportAdmissionJob } from '../lib/corpus-admission-report-integration.ts';
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * AUTHORIZATION coverage for the protected scheduled/internal sweep

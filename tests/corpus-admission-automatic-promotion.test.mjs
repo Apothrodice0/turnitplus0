@@ -32,6 +32,7 @@ const findCandidateCorpusRepresentations = async (client, hashes, opts) => {
 };
 import { deactivateAcceptedRepresentation } from "../lib/corpus-admission-admin-actions.ts";
 import { getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Automatic corpus promotion after ACCEPT / re-ACCEPT: previously, ACCEPT

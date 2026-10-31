@@ -11,6 +11,7 @@ import { rawSha256 } from "../lib/document-identity.ts";
 import { findFamilyForIdentity } from "../lib/document-family.ts";
 import { classifyFamilyRelationships } from "../lib/document-relationship.ts";
 import { withTestIdentity } from './helpers/test-signup.mjs';
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 // Phase C activation: POST /api/reports now runs the full identity +
 // fingerprint + family pipeline (lib/document-family.ts's

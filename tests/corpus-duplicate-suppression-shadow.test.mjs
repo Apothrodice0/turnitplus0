@@ -18,6 +18,7 @@ import {
   runShadowEval,
   SHADOW_POLICY,
 } from "./helpers/corpus-duplicate-shadow.mjs";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase B2a — the core shadow evaluator. Direct calls with controlled inputs

@@ -23,6 +23,7 @@ import { saveReportRemote } from "../lib/reports-remote.ts";
 import { buildReportSummary } from "../lib/report-types.ts";
 import { buildReportV2ViewModel } from "../lib/report-v2-view.ts";
 import { decodeReportFromPersistence } from "../lib/report-persistence.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * The check-time half of the scoring-normalization protocol: what a browser

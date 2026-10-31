@@ -17,6 +17,7 @@ import { runCorpusAdmissionPromotionSweep } from '../lib/corpus-admission-promot
 import { matchAgainstUserSubmissionCorpus } from '../lib/user-submission-matching.ts';
 import { matureCorpusBackings } from './helpers/corpus-maturity.mjs';
 import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * POST /api/developer/reset-account-rooms — "Clear account rooms". An admin

@@ -25,6 +25,7 @@ import * as signupRoute from "../app/api/auth/signup/route.ts";
 import { resetRateForTest, resetReadRateForTest, resetAuthRateForTest } from "../lib/rate-limit.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * FINAL SAME-ACCOUNT SELF HARDENING regression suite.

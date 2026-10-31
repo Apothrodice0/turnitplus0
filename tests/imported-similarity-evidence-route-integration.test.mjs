@@ -22,6 +22,7 @@ import {
   resetImportedSimilarityEvidenceCandidateIndexCacheForTest,
 } from "../lib/imported-similarity-evidence/index.ts";
 import { makeUnitRecord } from "./helpers/imported-similarity-evidence-fixtures.mjs";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * STEP 19 — proves, via the REAL POST /api/reports handler (not a mock), that

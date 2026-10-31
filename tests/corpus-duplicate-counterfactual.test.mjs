@@ -8,6 +8,7 @@ import {
   CorpusDuplicateCounterfactualInvariantError,
   CORPUS_DUPLICATE_COUNTERFACTUAL_VERSION,
 } from "../lib/corpus-duplicate-counterfactual.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase B1 — tests for the PURE shadow counterfactual core, plus the

@@ -25,6 +25,7 @@ import {
 import { formatCompactCount } from "../components/admin/archive/archive-format.ts";
 import * as listRoute from "../app/api/admin/archive/route.ts";
 import * as detailRoute from "../app/api/admin/archive/[id]/route.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Admin Archive / Corpus Explorer: admin authorization, metric/state

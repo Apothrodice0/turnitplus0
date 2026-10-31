@@ -20,6 +20,7 @@ import {
   compactUnifiedSimilarityForPersistence,
   PREVIOUS_UPLOAD_POSITIONS_ENCODING_MATCHED_POSITIONS,
 } from '../lib/unified-similarity-persistence.ts';
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Pre-launch hardening audit follow-up (long-document/2MB-ceiling

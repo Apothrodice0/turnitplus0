@@ -5,6 +5,7 @@ import path from 'path';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { OverviewReport } from '../components/report/similarity-report-papers.tsx';
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Phase E8G (2026-08-15, commit de00705): the report previously rendered

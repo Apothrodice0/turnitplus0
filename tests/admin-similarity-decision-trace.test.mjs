@@ -7,6 +7,7 @@ import {
   buildAdminSimilarityDecisionTrace,
   ADMIN_SIMILARITY_DECISION_TRACE_SCHEMA_VERSION,
 } from "../lib/admin-similarity-decision-trace.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Pure-builder coverage for lib/admin-similarity-decision-trace.ts. Every

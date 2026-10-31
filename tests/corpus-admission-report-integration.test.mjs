@@ -14,6 +14,7 @@ import {
   isCorpusAdmissionEnabled,
 } from "../lib/corpus-admission-report-integration.ts";
 import { _getActiveExtractionWorkerCountForTesting } from "../lib/corpus-text-extraction.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Controlled live-report integration: covers the flag default, durable

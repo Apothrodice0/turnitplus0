@@ -9,6 +9,7 @@ import { stripClientEvidenceInterpretation, refreshSelectiveCorpusCompletionSign
 import { sanitizeUnverifiedPublicationNotice } from '../../../../lib/academic-search/unverified-publication';
 import { sanitizeExtractionDiagnostic } from '../../../../lib/evidence-interpretation';
 import { deleteReportDocumentData } from '../../../../lib/report-deletion';
+import { deleteReportDerivedRecords } from '../../../../lib/report-derived-records';
 import { deleteReportCorpusAdmissionData } from '../../../../lib/corpus-admission-report-integration';
 import { getSessionUser, type SessionUser } from '../../../../lib/auth-session';
 import { attachStoredPredictedHighlights, deleteHighlightPrediction } from '../../../../lib/highlight-predictions';
@@ -369,6 +370,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
         });
         const deviceKey = owned.rows[0]?.device_key;
         const documentIdentityId = owned.rows[0]?.document_identity_id;
+        if (deviceKey) await deleteReportDerivedRecords(client, [{ device_key: String(deviceKey), id }]);
         if (deviceKey) await deleteHistoricalMatchSnapshot(client, { reportDeviceKey: String(deviceKey), reportId: id });
         if (deviceKey) await deleteHighlightPrediction(client, { deviceKey: String(deviceKey), reportId: id });
         await client.execute({
@@ -398,6 +400,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ i
           args: [deviceKey, id],
         });
         const documentIdentityId = owned.rows[0]?.document_identity_id;
+        await deleteReportDerivedRecords(client, [{ device_key: deviceKey, id }]);
         await deleteHistoricalMatchSnapshot(client, { reportDeviceKey: deviceKey, reportId: id });
         await client.execute({
           sql: 'DELETE FROM saved_reports WHERE device_key = ? AND id = ? AND user_id IS NULL',

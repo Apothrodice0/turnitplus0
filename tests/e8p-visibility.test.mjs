@@ -14,6 +14,7 @@ import { runHistoricalMatchShadowEvaluation } from "../lib/e8p-shadow-evaluation
 import { getExperimentalHistoricalMatchForDisplay, isE8pVisibilityAllowlisted } from "../lib/e8p-visibility.ts";
 import { OverviewReport } from "../components/report/similarity-report-papers.tsx";
 import { HIST_DISTINCTIVE_DOCUMENT, LONG_BLOCK, SECONDARY_REVIEW_DOCUMENT, HIST_GENERIC_DOCUMENT } from "../lib/e8k-calibration-fixtures.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 const repoRoot = path.resolve(".");
 const drizzleDir = path.join(repoRoot, "drizzle");

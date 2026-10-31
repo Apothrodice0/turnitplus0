@@ -100,11 +100,11 @@ export type CorpusProvenanceRecord = {
 
 /**
  * Two distinct consent shapes for two distinct callers. A live, per-account
- * user upload always carries `{ kind: "PER_USER_CONSENT", consented: true }`
- * — corpus-admission eligibility is mandatory for every authenticated
- * account (product decision), so lib/corpus-admission-report-integration.ts's
- * processReportAdmissionJob no longer reads users.corpus_reuse_consented_at
- * (now a vestigial column) to derive this. An externally-sourced bulk-import
+ * user upload carries `{ kind: "PER_USER_CONSENT", consented }`, and consented
+ * is never assumed: customer retention is off (lib/customer-corpus-policy.ts),
+ * so on any hosted deployment it is false and the gate retains nothing.
+ * users.corpus_reuse_consented_at is a vestigial column, not an authorization.
+ * An externally-sourced bulk-import
  * candidate has no per-account consent to check at all and instead carries
  * its own CorpusProvenanceRecord.
  */

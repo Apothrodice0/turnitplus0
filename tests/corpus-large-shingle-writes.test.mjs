@@ -24,6 +24,7 @@ import {
 import { matchAgainstUserSubmissionCorpus } from "../lib/user-submission-matching.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
 import { getCurrentCorpusMatchGeneration } from "../lib/report-historical-match.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * LARGE CORPUS SHINGLE WRITES hardening (write side).

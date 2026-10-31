@@ -18,6 +18,7 @@ import {
   reaffirmVerification,
   findVerificationDecisionsForSource,
 } from "../lib/provenance-verification-workflow.ts";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 const repo = path.resolve(".");
 const drizzleDir = path.join(repo, "drizzle");

@@ -16,6 +16,7 @@ import * as signupRoute from '../app/api/auth/signup/route.ts';
 import * as loginRoute from '../app/api/auth/login/route.ts';
 import * as deviceShadowRoute from '../app/api/developer/device-provenance-shadow/route.ts';
 import { withTestIdentity, grantTestAdmin } from './helpers/test-signup.mjs';
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Admin-only Device Passport shadow measurement summary

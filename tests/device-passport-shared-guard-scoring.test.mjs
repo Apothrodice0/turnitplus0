@@ -30,6 +30,7 @@ import {
   DEVICE_PASSPORT_ACTOR_HMAC_KEY_ENV,
 } from "../lib/device-passport-actor-ledger.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Refined CONSERVATIVE_COMBINED (Policy D) shared-device fan-out TELEMETRY,

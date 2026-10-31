@@ -10,6 +10,7 @@ import {
 } from "../lib/corpus-admission-report-integration.ts";
 import { resolvePrimarySimilaritySummary } from "../lib/report-primary-similarity.ts";
 import { matureCorpusBackings } from "./helpers/corpus-maturity.mjs";
+process.env.CUSTOMER_CORPUS_RETENTION_AUTHORIZED = "1"; // this suite exercises the corpus machinery itself; lib/customer-corpus-policy.ts keeps it off for customers
 
 /**
  * Product decision: cross-account TurnitPlus corpus / prior-submission
